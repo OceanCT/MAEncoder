@@ -27,36 +27,30 @@ void dprintf(const char* format, ...) {
 
 struct PredictTree {
     int depth;
+    int curdepth;
+    int pos; // [0, depth]
     std::vector<int> table;
     PredictTree(int bitwidth = 16) {
         // need 2^(depth + 1) byte num
         depth = bitwidth;
         table.resize(1 << (depth + 1), 0);
+        pos = 1;
+        curdepth = 1;
     }
-    int get_prob(int x, int len) {
-        int now = 1;
-        for(int i = len - 1; i >= 0; i--) {
-            now = now * 2 + ((x >> i) & 1);
-        }
-        int p1 = table[now * 2 + 1];
-        int p2 = table[now * 2];
-        // dprintf("get_prob: %d, %d, %d, %d\n", p1, p2, p1 + p2, 4095 * ((double) p1 / (p1 + p2)));
+    int get_currentprob() {
+        int p1 = table[pos * 2 + 1];
+        int p2 = table[pos * 2];
         assert(p1 >= 0 && p2 >= 0);
         if(p1 + p2 == 0) return 2048;
         return 4095 * ((double) p1 / (p1 + p2));
     }
-    void add(int x) {
-        int now = 1;
-        for(int i = depth - 1; i >= 0; i--) {
-            now = now * 2 + ((x >> i) & 1);
-            table[now]++;
-        }
-    }
-    void del(int x) {
-        int now = 1;
-        for(int i = depth - 1; i >= 0; i--) {
-            now = now * 2 + ((x >> i) & 1);
-            table[now]--;
+    void updatebit(int y) {
+        pos = pos * 2 + y;
+        table[pos]++;
+        curdepth++;
+        if(curdepth == depth) {
+            curdepth = 0;
+            pos = 1;
         }
     }
 };
@@ -65,36 +59,39 @@ struct SizedPredictTree {
     int depth;
     std::vector<int> table;
     std::deque<int> history;
+    int curdepth;
+    int pos; // [0, depth]
     int maxsize;
     SizedPredictTree(int bitwidth = 16, int maxsize = 1024) {
         // need 2^(depth + 1) byte num
         depth = bitwidth;
         table.resize(1 << (depth + 1), 0);
         this->maxsize = maxsize;
+        pos = 1;
+        curdepth = 0;
     }
-    int get_prob(int x, int len) {
-        int now = 1;
-        for(int i = len - 1; i >= 0; i--) {
-            now = now * 2 + ((x >> i) & 1);
-        }
-        int p1 = table[now * 2 + 1];
-        int p2 = table[now * 2];
-        // dprintf("get_prob: %d, %d, %d, %d\n", p1, p2, p1 + p2, 4095 * ((double) p1 / (p1 + p2)));
+    int get_currentprob() {
+        int p1 = table[pos * 2 + 1];
+        int p2 = table[pos * 2];
         assert(p1 >= 0 && p2 >= 0);
         if(p1 + p2 == 0) return 2048;
         return 4095 * ((double) p1 / (p1 + p2));
     }
     void add(int x) {
         history.push_back(x);
-        int now = 1;
-        for(int i = depth - 1; i >= 0; i--) {
-            now = now * 2 + ((x >> i) & 1);
-            table[now]++;
-        }
         if(history.size() > maxsize) {
             int y = history.front();
             history.pop_front();
             del(y);
+        }
+    }
+    void updatebit(int x) {
+        pos = pos * 2 + x;
+        table[pos]++;
+        curdepth++;
+        if(curdepth == depth) {
+            curdepth = 0;
+            pos = 1;
         }
     }
     void del(int x) {
@@ -121,6 +118,8 @@ struct Predictor {
         w1(1), w2(1) {}
 
     bool update_bit(int y) {
+        stree->updatebit(y);
+        tree->updatebit(y);
         int ret = (pr > 2048 && y) || (pr < 2048 && !y);
         int r1 = (pr1 > 2048 && y) || (pr1 < 2048 && !y);
         int r2 = (pr2 > 2048 && y) || (pr2 < 2048 && !y);
@@ -140,7 +139,6 @@ struct Predictor {
         bitpos++;
         buffer += buffer + y;
         if(bitpos == bitwidth) {
-            tree->add(buffer); 
             stree->add(buffer);
             w1 = w2 = 1;
             bitpos = 0;       
@@ -149,8 +147,8 @@ struct Predictor {
         return ret;
     }
     int predict_bit() {
-        int pr1 = stree->get_prob(buffer, bitpos);
-        int pr2 = tree->get_prob(buffer, bitpos);
+        int pr1 = stree->get_currentprob();
+        int pr2 = tree->get_currentprob();
         pr = (pr1 * w1 + pr2 * w2) / (w1 + w2);
         // dprintf("predict: %d\n", pr);
         assert(pr >= 0 && pr < 4096);
