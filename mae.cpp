@@ -108,30 +108,51 @@ struct SizedPredictTree {
 };
 
 struct Predictor {
-    int pr;
+    int pr, pr1, pr2;
+    int w1, w2; // [0-10]
+    SizedPredictTree* stree;
     PredictTree* tree;
     // use which tree to predict, current bitpos and last 32bit
     U32 bitpos, buffer;
     U32 bitwidth; 
-    Predictor(int bitwidth = 16): pr(2048), bitpos(0), buffer(0), bitwidth(bitwidth), tree(new PredictTree(bitwidth)){
-    
-    }
+    Predictor(int bitwidth = 16): pr(2048), bitpos(0), 
+        buffer(0), bitwidth(bitwidth), 
+        tree(new PredictTree(bitwidth)), stree(new SizedPredictTree(bitwidth, 1024)),
+        w1(1), w2(1) {}
 
     bool update_bit(int y) {
         int ret = (pr > 2048 && y) || (pr < 2048 && !y);
+        int r1 = (pr1 > 2048 && y) || (pr1 < 2048 && !y);
+        int r2 = (pr2 > 2048 && y) || (pr2 < 2048 && !y);
+        if(r1) {
+            if(w1 > 3) w1 <<= 1;
+            else w1++;
+        } else {
+            w1 = 1;
+        }
+        if(r2) {
+            if(w2 > 3) w2 <<= 1;
+            else w2++;
+        } else {
+            if(w2 > 1) w2--;
+        }
         // dprintf("predict: %d, actual bit: %d\n", pr, y);
         bitpos++;
         buffer += buffer + y;
         if(bitpos == bitwidth) {
-            tree->add(buffer);
-            // tree->del(buffer);    
+            tree->add(buffer); 
+            stree->add(buffer);
+            w1 = w2 = 1;
             bitpos = 0;       
             buffer = 0;
         }
         return ret;
     }
     int predict_bit() {
-        pr = tree->get_prob(buffer, bitpos);
+        int pr1 = stree->get_prob(buffer, bitpos);
+        int pr2 = tree->get_prob(buffer, bitpos);
+        pr = (pr1 * w1 + pr2 * w2) / (w1 + w2);
+        // dprintf("predict: %d\n", pr);
         assert(pr >= 0 && pr < 4096);
         return pr;
     }
@@ -200,6 +221,7 @@ struct Encoder {
 
 int bitwidth, base, basepos;
 U32 successcnt = 0;
+
 void compress(int *origin, size_t length, U8** res, int* res_len) {
     // dprintf("length: %ld\n", length);
     std::map<int, int> mp;
@@ -217,41 +239,46 @@ void compress(int *origin, size_t length, U8** res, int* res_len) {
         bitwidth++;
         tmp >>= 1;
     }
-    if(base != 0) {
+    // if(base != 0) {
         for(int i = 0; i < length; i++) {
             origin[i] -= base;
         }
-    } else {
-        int k = mp.begin()->first;
-        int knum = mp.begin()->second;
-        for(auto s: mp) {
-            if(s.second > knum) {
-                k = s.first;
-                knum = s.second;
-            }
-        }
-        // t == 0 -> t =  k - 1
-        // t < k -> t = t - 1
-        // t > k -> t = t
-        for(int i = 0; i < length; i++) {
-            if(!origin[i]) {
-                origin[i] = k - 1;
-            } else if(origin[i] < k) {
-                origin[i]--;
-            }
-        }
-    }
+    // } else {
+    //     int k = mp.begin()->first;
+    //     int knum = mp.begin()->second;
+    //     for(auto s: mp) {
+    //         if(s.second > knum) {
+    //             k = s.first;
+    //             knum = s.second;
+    //         }
+    //     }
+    //     // t == 0 -> t =  k - 1
+    //     // t < k -> t = t - 1
+    //     // t > k -> t = t
+    //     for(int i = 0; i < length; i++) {
+    //         if(!origin[i]) {
+    //             origin[i] = k - 1;
+    //         } else if(origin[i] < k) {
+    //             origin[i]--;
+    //         }
+    //     }
+    // }
 
     dprintf("bitwidth: %d, base: %d, maxx: %d\n", bitwidth, base, maxx);
     struct Encoder encoder(bitwidth);
-    
+
     // actual compression process
     *res = (U8*)malloc((length * 2) * sizeof(U8));
     encoder.origin = *res;
+    int last_correct = 0;
     for(int i = 0; i < length; i++) {
         // dprintf("code %d\n", origin[i]);
         for(int j = bitwidth - 1; j >= 0; j--) {
             encoder.code((origin[i] >> j) & 1);
+        }
+        if(i % 100000 == 0 && i) {
+            dprintf("compress sucessful bit num: %d\n", encoder.correctcnt - last_correct);
+            last_correct = encoder.correctcnt;
         }
     }
     *res_len = encoder.fb + 1;
