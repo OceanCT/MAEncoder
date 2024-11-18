@@ -7,18 +7,22 @@
 #include <queue>
 #include <map>
 #include <unistd.h>
+#include <cmath>
 typedef uint8_t U8;
 typedef uint16_t U16;
 typedef uint32_t U32;
 typedef uint64_t U64;
-const std::string file_path = "./szdat";
+const std::string file_path = "./szdat2";
 // const std::string file_path = "./data_pre/CESM-ATM/szdats/CLOUD_1_26_1800_3600.f32.sz4.szdat";
 // const int n = 100000000 / 4;
+const int n = 100000 * 10;
 // const int n = 673920000 / 4;
-const int n = 2869440;
+// const int n = 2869440;
 // const int n = 2869440;
 // const int n = 10;
 const int DEBUG = 1;
+
+
 
 void dprintf(const char* format, ...) {
     if(!DEBUG) return;
@@ -45,7 +49,22 @@ struct PredictTree {
         int p2 = table[pos * 2];
         assert(p1 >= 0 && p2 >= 0);
         if(p1 + p2 == 0) return 2048;
-        return 4095 * ((double) p1 / (p1 + p2));
+        if(p1 <= 50 && p2 <= 50) p1++, p2++;
+        double s = (double) (p1 - p2) / (p1 + p2);
+        int pr1 = 0, pr2 = 0, pr3 = 0, pr05 = 0;
+        pr1 = 2047 + 2048 * s;
+        if(p1 > p2) pr2 = 2047 + 2048 * s * s;
+        else pr2 = 2047 - 2048 * s * s;
+        pr3 = 2047 + 2048 * s * s * s;
+        if(p1 > p2) pr05 = 2047 + 2048 * sqrt(s);
+        else pr05 = 2047 - 2048 * sqrt(-s);
+        int pr = pr1;
+        if(pr >= 4096) pr = 4095;
+        if(pr < 0) pr = 0;
+        // printf("p1: %d, p2: %d, pr: %d\n", p1, p2, pr);
+        // return pr;
+        return pr;
+        // return 4095 * ((double) p1 / (p1 + p2));
     }
     void updatebit(int y) {
         pos = pos * 2 + y;
@@ -78,6 +97,8 @@ struct SizedPredictTree {
         // printf("p1: %d, p2: %d\n", p1, p2);
         assert(p1 >= 0 && p2 >= 0);
         if(p1 + p2 == 0) return 2048;
+        if(p1 <= 50 && p2 <= 50) p1++, p2++;
+        if(!p1 || !p2) p1++, p2++;
         return 4095 * ((double) p1 / (p1 + p2));
     }
     void add(int x) {
@@ -108,6 +129,7 @@ struct SizedPredictTree {
 
 };
 
+
 int printcnt = 0;
 struct Predictor {
     int pr, pr1, pr2;
@@ -131,8 +153,9 @@ struct Predictor {
         int ret = (pr > 2048 && y) || (pr < 2048 && !y);
         bool r1 = (pr1 > 2048 && y) || (pr1 < 2048 && !y);
         bool r2 = (pr2 > 2048 && y) || (pr2 < 2048 && !y);
+        // printf("bitpos: %d, act: %d, pr: %d, w1: %d, w2: %d\n", bitpos, y, pr, w1, w2);
         if(r1) {
-            if(w1 > 3) w1 <<= 1;
+            if(w1 > 4) w1 <<= 1;
             else w1++;
         } else {
             w1 = 1;
@@ -147,7 +170,11 @@ struct Predictor {
         buffer += buffer + y;
         if(bitpos == bitwidth) {
             stree->add(buffer);
-            w1 = w2 = 2;
+            // printf("\n");
+            // for(int sss = bitwidth - 1; sss >= 0; sss--) {
+            //     printf("%d,", (buffer >> sss) & 1);
+            // }
+            w1 = w2 = 1;
             bitpos = 0;       
             buffer = 0;
         }
@@ -180,7 +207,6 @@ struct Encoder {
     }    
 
     int code(int y = 0) {
-        // int p = 1017;
         int p = predictor.predict_bit();
         assert(p >= 0 && p < 4096);
         p += p < 2048;
@@ -193,10 +219,10 @@ struct Encoder {
             x1 <<= 8;
             x2 = (x2 << 8) + 255;
         }
+        // printf("file size: %d\n", fb);
         return y;
     }
     int decode(int y = 0) {
-        // int p = 1017;
         int p = predictor.predict_bit();
         assert(p >= 0 && p < 4096);
         p += p < 2048;
@@ -239,14 +265,32 @@ void compress(int *origin, size_t length, U8** res, int* res_len) {
         bitwidth++;
         maxx >>= 1;
     }
+    int reflection = (maxx + 1) / 2;
+    // maxx = 5 reflct = 4
+    // 0 1 2 3 4 5
+    // 0 3 2 4 1 5
+    // 0 reflect reflect - 1  reflect + 1
+
     dprintf("bitwidth: %d\n", bitwidth);
     // actual compression process
     struct Encoder encoder(bitwidth);
     *res = (U8*)malloc((length * 2) * sizeof(U8));
     (*res)[encoder.fb++] = bitwidth;
     encoder.origin = *res;
+    int lastsuccess = 0;
+    int lastsize = 0;
     for(int i = 0; i < length; i++) {
-        // dprintf("code %d\n", origin[i]);
+        if(i > 0 && i % 100000 == 0) {
+            printf("successful cnt: %d\n", encoder.correctcnt - lastsuccess);
+            printf("size: %d\n", encoder.fb - lastsize);
+            lastsuccess = encoder.correctcnt;
+            lastsize = encoder.fb;
+        }
+        if(origin[i] >= reflection) {
+            origin[i] = (origin[i] - reflection) * 2 + 1;
+        } else {
+            origin[i] = (reflection - origin[i]) * 2;
+        }
         for(int j = bitwidth - 1; j >= 0; j--) {
             encoder.code((origin[i] >> j) & 1);
         }
@@ -274,7 +318,7 @@ void decompress(U8 *origin, size_t length, int* res, int res_len) {
     }
 }
 
-int Mode = 0; // 1 for compress, 0 for decompress
+int Mode = 1; // 1 for compress, 0 for decompress
 
 signed main() { 
     int* origin = (int*)malloc(n * sizeof(int));
